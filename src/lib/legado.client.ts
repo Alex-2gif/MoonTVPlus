@@ -373,6 +373,10 @@ function normalizeConfiguredLegadoSource(item: any, index: number): BookSource |
   return null;
 }
 
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function fetchText(source: BookSource, url: string): Promise<string> {
   const safe = await validateProxyUrlServerSide(url);
   if (!safe) throw new Error('书源地址未通过安全校验');
@@ -381,20 +385,27 @@ async function fetchText(source: BookSource, url: string): Promise<string> {
   const { cacheTTL } = await resolveLegadoConfig();
   if (cached && cached.expiresAt > Date.now()) return cached.data;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, { headers: buildHeaders(source), signal: controller.signal, cache: 'no-store' });
-    if (!response.ok) throw new Error(`请求失败: ${response.status}`);
-    const contentLength = Number(response.headers.get('content-length') || '0');
-    if (contentLength > MAX_TEXT_BYTES) throw new Error('响应内容过大');
-    const text = await response.text();
-    if (text.length > MAX_TEXT_BYTES) throw new Error('响应内容过大');
-    textCache.set(cacheKey, { data: text, expiresAt: Date.now() + cacheTTL });
-    return text;
-  } finally {
-    clearTimeout(timeout);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, { headers: buildHeaders(source), signal: controller.signal, cache: 'no-store' });
+      if (!response.ok) throw new Error(`请求失败: ${response.status}`);
+      const contentLength = Number(response.headers.get('content-length') || '0');
+      if (contentLength > MAX_TEXT_BYTES) throw new Error('响应内容过大');
+      const text = await response.text();
+      if (text.length > MAX_TEXT_BYTES) throw new Error('响应内容过大');
+      textCache.set(cacheKey, { data: text, expiresAt: Date.now() + cacheTTL });
+      return text;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await wait(300 * (attempt + 1));
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+  throw lastError instanceof Error ? lastError : new Error('请求失败');
 }
 
 async function getSourceById(sourceId: string): Promise<BookSource> {

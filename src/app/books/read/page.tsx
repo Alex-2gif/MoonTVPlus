@@ -327,6 +327,24 @@ function findTocLabelByHref(items: TocItem[], currentHref: string): string {
   return '';
 }
 
+async function fetchJsonWithRetry<T>(url: string, init?: RequestInit, retries = 2): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const res = await fetch(url, init);
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || `请求失败: ${res.status}`);
+      return json as T;
+    } catch (error) {
+      lastError = error;
+      if (attempt < retries) {
+        await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('请求失败');
+}
+
 async function downloadBookWithProgress(
   manifest: Pick<BookReadManifest, 'book' | 'format' | 'acquisitionHref'>,
   onProgress: (received: number, total: number | null) => void
@@ -492,10 +510,8 @@ function ChapterReader({ manifest }: { manifest: BookReadManifest }) {
     setLoading(true);
     setError('');
     const url = manifest.chaptersUrl || `/api/books/read/chapters?sourceId=${encodeURIComponent(manifest.book.sourceId)}&bookId=${encodeURIComponent(manifest.book.id)}`;
-    fetch(url, { cache: 'no-store' })
-      .then(async (res) => {
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error || '获取目录失败');
+    fetchJsonWithRetry<{ chapters?: BookChapter[] }>(url, { cache: 'no-store' })
+      .then((json) => {
         if (cancelled) return;
         const list = (json.chapters || []) as BookChapter[];
         setChapters(list);
@@ -520,10 +536,8 @@ function ChapterReader({ manifest }: { manifest: BookReadManifest }) {
     scrollRef.current?.scrollTo({ top: 0, behavior: 'auto' });
     const params = new URLSearchParams({ sourceId: manifest.book.sourceId, href: item.href });
     if (manifest.acquisitionHref) params.set('tocHref', manifest.acquisitionHref);
-    fetch(`/api/books/read/chapter?${params.toString()}`, { cache: 'no-store' })
-      .then(async (res) => {
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error || '获取章节失败');
+    fetchJsonWithRetry<BookChapterContent>(`/api/books/read/chapter?${params.toString()}`, { cache: 'no-store' })
+      .then((json) => {
         setChapter({ ...(json as BookChapterContent), title: (json as BookChapterContent).title || item.title });
         const progressPercent = chapters.length > 0 ? Math.round(((currentIndex + 1) / chapters.length) * 100) : 0;
         const record: BookReadRecord = {
